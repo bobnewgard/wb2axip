@@ -118,12 +118,6 @@ module	axidma #(
 		// address width.
 		parameter	LGLEN = C_AXI_ADDR_WIDTH,
 		//
-		// OPT_LOWPOWER:
-		parameter [0:0]	OPT_LOWPOWER = 1'b0,
-		//
-		// OPT_CLKGATE:
-		parameter [0:0]	OPT_CLKGATE = OPT_LOWPOWER,
-		//
 		// AXI uses ID's to transfer information.  This core rather
 		// ignores them.  Instead, it uses a constant ID for all
 		// transfers.  The following two parameters control that ID.
@@ -143,12 +137,6 @@ module	axidma #(
 		// {{{
 		input	wire	S_AXI_ACLK,
 		input	wire	S_AXI_ARESETN,
-		// AXI low-power interface
-		// {{{
-		input	wire	S_AXI_CSYSREQ,	// = 1'b1 (default, no gating)
-		output	wire	S_AXI_CACTIVE,
-		output	wire	S_AXI_CSYSACK,
-		// }}}
 		//
 		// The AXI4-lite control interface
 		input	wire				S_AXIL_AWVALID,
@@ -1604,67 +1592,11 @@ module	axidma #(
 	//
 	//
 
-	generate if (OPT_CLKGATE)
-	begin : CLK_GATING
-		// {{{
-		reg	gatep, clk_active, r_gate;
-		reg	gaten /* verilator clock_enable */;
+        // Always active
+        assign	clk_gate  = 1'b1;
+        assign	gated_clk = S_AXI_ACLK;
 
-		always @(posedge S_AXI_ACLK)
-		if (!S_AXI_ARESETN)
-			clk_active <= 1'b0;
-		else begin
-			clk_active <= 1'b0;
 
-			if (r_busy)
-				clk_active <= 1'b1;
-			if (awskd_valid || wskd_valid || arskd_valid)
-				clk_active <= 1'b1;
-			if (S_AXIL_BVALID || S_AXIL_RVALID)
-				clk_active <= 1'b1;
-		end
-
-		assign	S_AXI_CACTIVE = clk_active
-			|| (S_AXIL_AWVALID || S_AXIL_WVALID || S_AXIL_ARVALID);
-
-		assign	S_AXI_CSYSACK = S_AXI_CACTIVE || S_AXI_CSYSREQ;
-
-		always @(posedge S_AXI_ACLK)
-		if (!S_AXI_ARESETN)
-			gatep <= 1'b1;
-		else
-			gatep <= S_AXI_CACTIVE || S_AXI_CSYSREQ || S_AXI_CSYSACK;
-
-		always @(negedge S_AXI_ACLK)
-		if (!S_AXI_ARESETN)
-			gaten <= 1'b1;
-		else
-			gaten <= gatep;
-
-		assign	gated_clk = S_AXI_ACLK && gaten;
-
-		always @(posedge S_AXI_ACLK)
-		if (!S_AXI_ARESETN)
-			r_gate <= 1'b1;
-		else
-			r_gate <= gatep;
-
-		assign	clk_gate  = r_gate;
-		// }}}
-	end else begin : NO_CLK_GATING
-		// {{{
-		// Always active
-		assign	S_AXI_CACTIVE = 1'b1;
-		assign	S_AXI_CSYSACK = 1'b1;
-		assign	clk_gate  = 1'b1;
-		assign	gated_clk = S_AXI_ACLK;
-
-		// Verilator lint_off UNUSED
-		wire	unused_clkgate;
-		assign	unused_clkgate = &{ 1'b0, S_AXI_CSYSREQ };
-		// Verilator lint_on  UNUSED
-		// }}}
-	end endgenerate
 	// }}}
 	// Keep Verilator happy
 	// {{{
