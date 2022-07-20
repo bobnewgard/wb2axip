@@ -21,7 +21,7 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 // }}}
-// Copyright (C) 2019-2021, Gisselquist Technology, LLC
+// Copyright (C) 2019-2022, Gisselquist Technology, LLC
 // {{{
 // This file is part of the WB2AXIP project.
 //
@@ -39,7 +39,6 @@
 // under the License.
 //
 ////////////////////////////////////////////////////////////////////////////////
-//
 //
 `default_nettype	none
 // }}}
@@ -69,13 +68,13 @@ module demofull #(
 		//	    for(k=0; k<C_S_AXI_DATA_WIDTH/8; k=k+1)
 		//	    begin
 		//		if (o_wstrb[k])
-		//		mem[o_waddr[AW-1:LSB]][k*8+:8] <= o_wdata[k*8+:8]
+		//		mem[o_waddr][k*8+:8] <= o_wdata[k*8+:8]
 		//	    end
 		//	end
 		//
 		//	always @(posedge S_AXI_ACLK)
 		//	if (o_rd)
-		//		i_rdata <= mem[o_raddr[AW-1:LSB]];
+		//		i_rdata <= mem[o_raddr];
 		//
 		// 4. The rule on the input is that i_rdata must be registered,
 		//    and that it must only change if o_rd is true.  Violating

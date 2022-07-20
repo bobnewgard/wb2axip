@@ -20,14 +20,22 @@
 //		status.
 //
 //	[31]	r_busy
-//		True if the core is in the middle of a transaction
+//		True if the core is in the middle of a transaction.  Set this
+//		bit to one to begin a transaction.
 //
 //	[30]	r_err
 //		True if the core has detected an error, such as FIFO
 //		overflow while writing, or FIFO overflow in continuous mode.
 //
 //		Writing a '1' to this bit while the core is idle will clear it.
-//		New transfers will not start until this bit is cleared.
+//		New transfers will not start until this bit is cleared.  For
+//		this reason, I often start a new transfer by writing to bits
+//		31 and 30 of this register.
+//
+//		_s2mm->a_control = 0xc0000000;
+//
+//		Other bits may be appropriate as well, as discussed below,
+//		depending on your application.
 //
 //	[29]	r_complete
 //		True if the transaction has completed, whether normally or
@@ -49,35 +57,43 @@
 //	[27]	!r_increment
 //
 //		If clear, the core writes to subsequent and incrementing
-//		addresses.  If set, the core writes to the same address
-//		throughout a transaction.
+//		addresses--the normal copy to memory case.  If !r_increment is
+//		set, the core writes to the same address throughout the
+//		transaction.  This is useful if you want to copy data to a
+//		FIFO or other device living at a single address in the memory
+//		map.
 //
 //		Writes to CMD_CONTROL while the core is idle will adjust this
 //		bit.
 //
-//	[26]	!r_tlast_syncd
+//	[26]	!tlast_syncd
 //
 //		Read only status indicator.  Reads 0 if OPT_TLAST_SYNC isn't
-//		set.  If set, this bit indicates whether or not the memory
-//		transfer is currently aligned with any stream packets, or
-//		whether it is out of synchronization and waiting to sync with
-//		the incoming stream.  If it is out of alignment, the core
-//		will synchronize itself automatically.
+//		set.  If OPT_TLAST_SYNC is set, then this bit indicates whether
+//		or not the memory transfer is currently aligned with any stream
+//		packets, or whether it is out of synchronization and waiting to
+//		sync with the incoming stream.  If the IP is out of alignment
+//		and OPT_TLAST_SYNC is set, then the core will synchronize
+//		itself automatically by holding TREADY high and ignoring data
+//		until the first sample after TLAST.
 //
 //	[25]	Error code, decode error
 //
-//		Read only bit.  True following any AXI decode error.  Cleared
-//		whenever the error bit is cleared.
+//		Read only bit.  True following any AXI decode error.  This will
+//		also set the error bit.  When the error bit is cleared, this
+//		bit will be automatically cleared as well.
 //
 //	[24]	Error code, slave error
 //
-//		Read only bit.  True following any AXI slave error.  Cleared
-//		whenever the error bit is cleared.
+//		Read only bit.  True following any AXI slave error.  This will
+//		also set the error bit.  When the error bit is cleared, this bit
+//		will be automatically cleared as well.
 //
 //	[23]	Error code, overflow error
 //
-//		Read only bit.  True following any AXI stream overflow.
-//		Cleared whenever the error bit is cleared.
+//		Read only bit.  True following any AXI stream overflow.  As with
+//		the other two error code bits, this one will also set the error
+//		bit.  It will also be cleared whenever the error bit is cleared.
 //
 //		A "proper" AXI stream will never nor can it ever overflow.  This
 //		overflow check therefore looks for AXI stream protocol
@@ -96,9 +112,10 @@
 //		These are read-only bits, returning the size of the FIFO.
 //
 //	ABORT
-//		If the core is busy, and ABORT_KEY (currently set to 8'h26
-//		below) is written to the top 8-bits of this register,
-//		the current transfer will be aborted.  Any pending writes
+//		If the core is busy, and the ABORT_KEY (currently set to 8'h26
+//		below) is written to the top 8-bits ([31:24]) of this command
+//		register, then the current transfer will be aborted.  Yes, this
+//		does repurpose the other bits written above.  Any pending writes
 //		will be completed, but nothing more will be written.
 //
 //		Alternatively, the core will enter into an abort state
@@ -171,7 +188,7 @@
 //
 ////////////////////////////////////////////////////////////////////////////////
 // }}}
-// Copyright (C) 2019-2021, Gisselquist Technology, LLC
+// Copyright (C) 2019-2022, Gisselquist Technology, LLC
 // {{{
 // This file is part of the WB2AXIP project.
 //
@@ -205,6 +222,18 @@ module	axis2mm #(
 		parameter	C_AXI_DATA_WIDTH = 32,
 		parameter	C_AXI_ID_WIDTH = 1,
 		parameter	C_AXIS_TUSER_WIDTH = 0,
+		//
+		// OPT_AXIS_SKIDBUFFER will place a buffer between the incoming
+		// AXI stream interface and the outgoing AXI stream ready.  This
+		// is technically necessary, and probably good practice too,
+		// when dealing with high speed networks.
+		parameter [0:0]	OPT_AXIS_SKIDBUFFER = 1,
+		//
+		// OPT_AXIS_SKIDREGISTER will force the outputs of the skid
+		// buffer to be registered.  This is something you would
+		// do primarily if you are trying to hit high speeds through
+		// this core.
+		parameter [0:0]	OPT_AXIS_SKIDREGISTER = 0,
 		//
 		// OPT_TLAST_SYNC will synchronize the write with any incoming
 		// packets.  Packets are assumed to be synchronized initially
@@ -244,6 +273,17 @@ module	axis2mm #(
 		// (possibly) non-continuous bursts.  (THIS IS A PLACEHOLDER.
 		// UNALIGNED ADDRESSING IS NOT CURRENTLY SUPPORTED.)
 		localparam [0:0]	OPT_UNALIGNED = 0,
+		//
+		parameter	[0:0]	OPT_LOWPOWER  = 1'b0,
+		parameter	[0:0]	OPT_CLKGATE   = OPT_LOWPOWER,
+		//
+		// OPT_ASYNCMEM.  The default FIFO implementation uses an
+		// asynchronous memory read, which will return the result in
+		// the same clock it is requested within.  This forces the
+		// FIFO to use distributed RAM.  For those architectures that
+		// don't have distributed RAM, or those designs that need to
+		// use block RAM, this flag should be set to zero.
+		parameter	[0:0]	OPT_ASYNCMEM  = 1'b1,
 		//
 		// Size of the AXI-lite bus.  These are fixed, since 1) AXI-lite
 		// is fixed at a width of 32-bits by Xilinx def'n, and 2) since
@@ -342,7 +382,17 @@ module	axis2mm #(
 				CMD_LENLO     = 3'b110,
 				CMD_LENHI     = 3'b111;
 				// CMD_RESERVED = 2'b11;
-	localparam	LGMAXBURST=(LGFIFO > 8) ? 8 : LGFIFO-1;
+
+	// The maximum burst size is either 256, or half the FIFO size,
+	// whichever is smaller.
+	localparam	TMP_LGMAXBURST=(LGFIFO > 8) ? 8 : LGFIFO-1;
+	// Of course, if this busts our 4kB packet size, it's an error.
+	// Let's clip to that size, then, if the LGMAXBURST would otherwise
+	// break it.  So .. if 4kB is larger than our maximum burst size, then
+	// no change is required.
+	localparam	LGMAXBURST = ((4096 / (C_AXI_DATA_WIDTH / 8))
+						> (1<<TMP_LGMAXBURST))
+			? TMP_LGMAXBURST : $clog2(4096 * 8 / C_AXI_DATA_WIDTH);
 	localparam	LGMAX_FIXED_BURST = (LGMAXBURST > 4) ? 4 : LGMAXBURST;
 	localparam	MAX_FIXED_BURST = (1<<LGMAX_FIXED_BURST);
 	localparam	LGLENW  = LGLEN  - ADDRLSB;
@@ -355,8 +405,14 @@ module	axis2mm #(
 
 	// Signal declarations
 	// {{{
-	wire	i_clk   =  S_AXI_ACLK;
+	wire	clk_active, gated_clk;
+	wire	i_clk   =  gated_clk;
 	wire	i_reset = !S_AXI_ARESETN;
+
+	// Incoming stream buffer
+	wire		sskd_valid, sskd_ready, sskd_last;
+	wire	[C_AXI_DATA_WIDTH-1:0]	sskd_data;
+	wire	[((C_AXIS_TUSER_WIDTH>0) ? C_AXIS_TUSER_WIDTH : 1)-1:0] sskd_user;
 
 	reg	r_busy, r_err, r_complete, r_continuous, r_increment,
 		cmd_abort, zero_length, r_pre_start,
@@ -414,6 +470,7 @@ module	axis2mm #(
 
 	// Speed up checking for zeros
 	reg				aw_none_remaining,
+					aw_none_outstanding,
 					aw_last_outstanding,
 					wr_none_pending; // r_none_remaining;
 
@@ -423,7 +480,7 @@ module	axis2mm #(
 
 	//
 	// Option processing
-	reg			r_tlast_syncd;
+	wire			tlast_syncd;
 
 	reg			aw_multiple_full_bursts,
 				aw_multiple_fixed_bursts,
@@ -434,7 +491,33 @@ module	axis2mm #(
 
 
 	// }}}
+	////////////////////////////////////////////////////////////////////////
+	//
+	// AXI Stream skidbuffer
+	// {{{
+	////////////////////////////////////////////////////////////////////////
+	//
+	//
 
+	skidbuffer #(
+		// {{{
+		.OPT_OUTREG(OPT_AXIS_SKIDREGISTER),
+		.DW(C_AXI_DATA_WIDTH + 1
+			+ ((C_AXIS_TUSER_WIDTH > 0) ? C_AXIS_TUSER_WIDTH:1)),
+		.OPT_LOWPOWER(OPT_LOWPOWER),
+		.OPT_PASSTHROUGH(!OPT_AXIS_SKIDBUFFER)
+		// }}}
+	) skd_stream(
+		// {{{
+		.i_clk(S_AXI_ACLK), .i_reset(reset_fifo),
+		.i_valid(S_AXIS_TVALID), .o_ready(S_AXIS_TREADY),
+		.i_data({ S_AXIS_TUSER, S_AXIS_TDATA, S_AXIS_TLAST }),
+		.o_valid(sskd_valid), .i_ready(sskd_ready),
+			.o_data({ sskd_user, sskd_data, sskd_last })
+		// }}}
+	);
+
+	// }}}
 	////////////////////////////////////////////////////////////////////////
 	//
 	// AXI-lite signaling
@@ -453,7 +536,8 @@ module	axis2mm #(
 
 	skidbuffer #(
 		// {{{
-		.OPT_OUTREG(0), .DW(C_AXIL_ADDR_WIDTH-AXILLSB)
+		.OPT_OUTREG(0), .DW(C_AXIL_ADDR_WIDTH-AXILLSB),
+		.OPT_LOWPOWER(OPT_LOWPOWER)
 		// }}}
 	) axilawskid(
 		// {{{
@@ -467,7 +551,8 @@ module	axis2mm #(
 
 	skidbuffer #(
 		// {{{
-		.OPT_OUTREG(0), .DW(C_AXIL_DATA_WIDTH+C_AXIL_DATA_WIDTH/8)
+		.OPT_OUTREG(0), .DW(C_AXIL_DATA_WIDTH+C_AXIL_DATA_WIDTH/8),
+		.OPT_LOWPOWER(OPT_LOWPOWER)
 		// }}}
 	) axilwskid(
 		// {{{
@@ -479,7 +564,7 @@ module	axis2mm #(
 		// }}}
 	);
 
-	assign	axil_write_ready = awskd_valid && wskd_valid
+	assign	axil_write_ready = clk_active && awskd_valid && wskd_valid
 			&& (!S_AXIL_BVALID || S_AXIL_BREADY);
 
 	initial	axil_bvalid = 0;
@@ -502,7 +587,8 @@ module	axis2mm #(
 
 	skidbuffer #(
 		// {{{
-		.OPT_OUTREG(0), .DW(C_AXIL_ADDR_WIDTH-AXILLSB)
+		.OPT_OUTREG(0), .DW(C_AXIL_ADDR_WIDTH-AXILLSB),
+		.OPT_LOWPOWER(OPT_LOWPOWER)
 		// }}}
 	) axilarskid(
 		// {{{
@@ -514,7 +600,7 @@ module	axis2mm #(
 		// }}}
 	);
 
-	assign	axil_read_ready = arskd_valid
+	assign	axil_read_ready = clk_active && arskd_valid
 				&& (!axil_read_valid || S_AXIL_RREADY);
 
 	initial	axil_read_valid = 1'b0;
@@ -559,7 +645,7 @@ module	axis2mm #(
 	// last_tdata -- used for overflow checking
 	// {{{
 	always @(posedge i_clk)
-		last_tdata <= S_AXIS_TDATA;
+		last_tdata <= sskd_data;
 	// }}}
 
 	// overflow
@@ -581,7 +667,7 @@ module	axis2mm #(
 	begin
 		// The overflow pulse is only one clock period long
 		overflow <= 0;
-		if (!S_AXIS_TVALID)
+		if (!sskd_valid)
 			overflow <= 1;
 		if (S_AXIS_TDATA != last_tdata)
 			overflow <= 1;
@@ -912,7 +998,7 @@ module	axis2mm #(
 		w_status_word[29] = r_complete;
 		w_status_word[28] = r_continuous;
 		w_status_word[27] = !r_increment;
-		w_status_word[26] = !r_tlast_syncd;
+		w_status_word[26] = !tlast_syncd;
 		w_status_word[25:23] = r_errcode;
 		w_status_word[22] = cmd_abort;
 		w_status_word[20:16] = LGFIFO;
@@ -978,8 +1064,10 @@ module	axis2mm #(
 	////////////////////////////////////////////////////////////////////////
 	//
 	//
+
+	// Reset the FIFO between bursts, as long as r_continuous isn't set
 	assign	reset_fifo = i_reset || (!r_busy && (!r_continuous || r_err));
-	assign	write_to_fifo  = S_AXIS_TVALID && S_AXIS_TREADY&& r_tlast_syncd;
+	assign	write_to_fifo  = sskd_valid && sskd_ready && tlast_syncd;
 	assign	read_from_fifo = M_AXI_WVALID  && M_AXI_WREADY
 					&& !axi_abort_pending;
 
@@ -992,11 +1080,13 @@ module	axis2mm #(
 	// 	if we are ever out of synchronization--then we can ignore data
 	//		until the next TLAST comes, where we must realign
 	//		ourselves
-	assign	S_AXIS_TREADY  = !fifo_full && (OPT_TREADY_WHILE_IDLE
-					|| !reset_fifo || !r_tlast_syncd);
+	assign	sskd_ready  = clk_active && !fifo_full
+			&& (OPT_TREADY_WHILE_IDLE
+				|| !reset_fifo || !tlast_syncd);
 
 	generate if (OPT_TLAST_SYNC)
 	begin
+		reg	r_tlast_syncd;
 		// If the user has set OPT_TLAST_SYNC, then he wants to make
 		// certain that we don't start writing until the first stream
 		// value after the TLAST packet indicating an end of packet.
@@ -1009,21 +1099,29 @@ module	axis2mm #(
 		// Note, this doesn't catch the case where the FIFO can't keep
 		// up.  Lost data (might be) caught by overflow below.
 		initial	r_tlast_syncd = 1;
-		always @(posedge S_AXI_ACLK)
+		always @(posedge i_clk)
 		if (!S_AXI_ARESETN)
 			r_tlast_syncd <= 1;
-		else if (S_AXIS_TVALID && S_AXIS_TREADY && S_AXIS_TLAST)
-			r_tlast_syncd <= 1;
-		else if (S_AXIS_TVALID && S_AXIS_TREADY && !write_to_fifo)
-			r_tlast_syncd <= 0;
+		else if (sskd_valid && sskd_ready)
+		begin
+			if (sskd_last)
+				r_tlast_syncd <= 1;
+			else if (reset_fifo)
+				r_tlast_syncd <= 0;
+		end
 
+		assign	tlast_syncd = r_tlast_syncd;
 	end else begin
 
 		//
 		// If the option isn't set, then we are always synchronized.
 		//
-		always @(*)
-			r_tlast_syncd = 1;
+		assign	tlast_syncd = 1;
+
+		// Verilator lint_off UNUSED
+		wire unused_tlast_sync;
+		assign	unused_tlast_sync = &{ 1'b0, sskd_last };
+		// Verilator lint_on  UNUSED
 	end endgenerate
 
 	// Incoming FIFO
@@ -1034,14 +1132,16 @@ module	axis2mm #(
 		sfifo #(
 			// {{{
 			.BW(C_AXIS_TUSER_WIDTH + C_AXI_DATA_WIDTH),
-			.LGFLEN(LGFIFO)
+			.LGFLEN(LGFIFO), .OPT_ASYNC_READ(OPT_ASYNCMEM)
 			// }}}
 		) u_sfifo (
 			// {{{
-			i_clk, reset_fifo,
-			write_to_fifo, { S_AXIS_TUSER, S_AXIS_TDATA },
-					fifo_full, fifo_fill,
-			read_from_fifo, fifo_data, fifo_empty
+			.i_clk(i_clk), .i_reset(reset_fifo),
+			.i_wr(write_to_fifo),
+				.i_data({ sskd_user, sskd_data }),
+				.o_full(fifo_full), .o_fill(fifo_fill),
+			.i_rd(read_from_fifo), .o_data(fifo_data),
+				.o_empty(fifo_empty)
 			// }}}
 		);
 
@@ -1052,13 +1152,15 @@ module	axis2mm #(
 		sfifo #(
 			// {{{
 			.BW(C_AXI_DATA_WIDTH),
-			.LGFLEN(LGFIFO)
+			.LGFLEN(LGFIFO), .OPT_ASYNC_READ(OPT_ASYNCMEM)
 			// }}}
 		) u_sfifo (
 			// {{{
-			i_clk, reset_fifo,
-			write_to_fifo, S_AXIS_TDATA, fifo_full, fifo_fill,
-			read_from_fifo, fifo_data, fifo_empty
+			.i_clk(i_clk), .i_reset(reset_fifo),
+			.i_wr(write_to_fifo), .i_data(sskd_data),
+				.o_full(fifo_full), .o_fill(fifo_fill),
+			.i_rd(read_from_fifo), .o_data(fifo_data),
+				.o_empty(fifo_empty)
 			// }}}
 		);
 
@@ -1069,7 +1171,7 @@ module	axis2mm #(
 		// {{{
 		// Verilator lint_off UNUSED
 		wire	unused_tuser;
-		assign	unused_tuser = &{ 1'b0, S_AXIS_TUSER };
+		assign	unused_tuser = &{ 1'b0, sskd_user };
 		// Verilator lint_on UNUSED
 		// }}}
 	end endgenerate
@@ -1206,18 +1308,22 @@ module	axis2mm #(
 	// (yet) been returned.
 	// {{{
 	initial	aw_last_outstanding   = 0;
+	initial	aw_none_outstanding   = 1;
 	initial	aw_bursts_outstanding = 0;
 	always @(posedge i_clk)
 	if (i_reset)
 	begin
 		aw_bursts_outstanding <= 0;
+		aw_none_outstanding <= 1;
 		aw_last_outstanding <= 0;
 	end else case ({ phantom_start, M_AXI_BVALID && M_AXI_BREADY })
 	2'b01:	begin
 		aw_bursts_outstanding <= aw_bursts_outstanding - 1;
+		aw_none_outstanding <= (aw_bursts_outstanding == 1);
 		aw_last_outstanding <= (aw_bursts_outstanding == 2);
 		end
 	2'b10:	begin
+		aw_none_outstanding <= 0;
 		aw_bursts_outstanding <= aw_bursts_outstanding + 1;
 		aw_last_outstanding   <= (aw_bursts_outstanding == 0);
 		end
@@ -1227,11 +1333,16 @@ module	axis2mm #(
 
 	// Are we there yet?
 	// {{{
+	// We can't just look for the last BVALID, since ... it might be
+	// possible to receive an abort before the FIFO is full enough to
+	// initiate the first burst.
 	always @(*)
 	if (!r_busy)
 		w_complete = 0;
 	else
-		w_complete = !M_AXI_AWVALID && (aw_none_remaining)&&(aw_last_outstanding) && (M_AXI_BVALID);
+		w_complete = !M_AXI_AWVALID && (aw_none_remaining)
+			&&((aw_last_outstanding && M_AXI_BVALID)
+				|| aw_none_outstanding);
 	// }}}
 
 	// Are we stopping early?  Aborting something ongoing?
@@ -1267,11 +1378,11 @@ module	axis2mm #(
 		wr_none_pending   <= (wr_writes_pending == 1);
 		end
 	2'b10: begin
-		wr_writes_pending <= wr_writes_pending + (M_AXI_AWLEN + 1);
+		wr_writes_pending <= wr_writes_pending + (M_AXI_AWLEN[LGMAXBURST-1:0] + 1);
 		wr_none_pending   <= 0;
 		end
 	2'b11: begin
-		wr_writes_pending <= wr_writes_pending + (M_AXI_AWLEN);
+		wr_writes_pending <= wr_writes_pending + (M_AXI_AWLEN[LGMAXBURST-1:0]);
 		wr_none_pending   <= (M_AXI_WLAST);
 		end
 	endcase
@@ -1415,12 +1526,29 @@ module	axis2mm #(
 				>= aw_requests_remaining[LGMAXBURST-1:0]);
 
 	//
-	//
-	always @(posedge i_clk)
-	begin
+	// axi_awlen
+	// {{{
+	generate if (LGMAXBURST >= 8)
+	begin : GEN_BIG_AWLEN
+
+		always @(posedge i_clk)
 		if (!M_AXI_AWVALID || M_AXI_AWREADY)
 			axi_awlen  <= r_max_burst[7:0] - 8'd1;
 
+	end else begin : GEN_SHORT_AWLEN
+
+		always @(posedge i_clk)
+		if (!M_AXI_AWVALID || M_AXI_AWREADY)
+		begin
+			axi_awlen  <= { {(8-LGMAXBURST){1'b0}}, r_max_burst } - 8'd1;
+			axi_awlen[7:LGMAXBURST] <= 0;
+		end
+
+	end endgenerate
+	// }}}
+
+	always @(posedge i_clk)
+	begin
 		if (M_AXI_AWVALID && M_AXI_AWREADY)
 		begin
 			axi_awaddr[ADDRLSB-1:0] <= 0;
@@ -1429,8 +1557,8 @@ module	axis2mm #(
 				axi_awaddr[C_AXI_ADDR_WIDTH-1:ADDRLSB]
 				    <= axi_awaddr[C_AXI_ADDR_WIDTH-1:ADDRLSB]
 						+ (M_AXI_AWLEN+1);
-			// Verilator lint_on WIDTH
 		end
+		// Verilator lint_on WIDTH
 
 		if (!r_busy)
 			axi_awaddr<= cmd_addr;
@@ -1465,11 +1593,14 @@ module	axis2mm #(
 	end
 	// }}}
 
+	// axi_wstrb
+	// {{{
 	always @(posedge i_clk)
 	if (!M_AXI_WVALID || M_AXI_WREADY)
 		axi_wstrb <= (axi_abort_pending) ? 0:-1;
 	// }}}
 
+	// Fixed bus values
 	// {{{
 	assign	M_AXI_AWVALID= axi_awvalid;
 	assign	M_AXI_AWID   = AXI_ID;
@@ -1480,7 +1611,7 @@ module	axis2mm #(
 	// Verilator lint_on  WIDTH
 	assign	M_AXI_AWBURST= { 1'b0, r_increment };
 	assign	M_AXI_AWLOCK = 0;
-	assign	M_AXI_AWCACHE= 0;
+	assign	M_AXI_AWCACHE= 4'h3;
 	assign	M_AXI_AWPROT = 0;
 	assign	M_AXI_AWQOS  = 0;
 
@@ -1490,7 +1621,83 @@ module	axis2mm #(
 	// M_AXI_WLAST = ??
 
 	assign	M_AXI_BREADY = 1;
+	// }}}
 
+	// }}}
+	////////////////////////////////////////////////////////////////////////
+	//
+	// (Optional) Clock gating
+	// {{{
+	////////////////////////////////////////////////////////////////////////
+	//
+	//
+
+	generate if (OPT_CLKGATE)
+	begin : CLK_GATING
+		// {{{
+		reg	gatep, r_clk_active;
+		reg	gaten /* verilator clock_enable */;
+
+		// clk_active
+		// {{{
+		initial	r_clk_active = 1'b1;
+		always @(posedge S_AXI_ACLK)
+		if (!S_AXI_ARESETN)
+			r_clk_active <= 1'b1;
+		else begin
+			r_clk_active <= 1'b0;
+
+			if (r_busy)
+				r_clk_active <= 1'b1;
+			if (awskd_valid || wskd_valid || arskd_valid)
+				r_clk_active <= 1'b1;
+			if (S_AXIL_BVALID || S_AXIL_RVALID)
+				r_clk_active <= 1'b1;
+
+			// Activate the clock on incoming data
+				// reset_fifo = i_reset || (!r_busy && (!r_continuous || r_err));
+				// !reset_fifo= r_busy || (r_continuous && !r_err)
+				// !reset_fifo= (r_continuous && !r_err)
+			if (sskd_valid && !fifo_full
+				&& (!tlast_syncd || (r_continuous && !r_err)))
+				r_clk_active <= 1'b1;
+		end
+
+		assign	clk_active = r_clk_active;
+		// }}}
+		// Gate the clock here locally
+		// {{{
+		initial	gatep = 1'b1;
+		always @(posedge S_AXI_ACLK)
+		if (!S_AXI_ARESETN)
+			gatep <= 1'b1;
+		else
+			gatep <= clk_active;
+
+		initial	gaten = 1'b1;
+		always @(negedge S_AXI_ACLK)
+		if (!S_AXI_ARESETN)
+			gaten <= 1'b1;
+		else
+			gaten <= gatep;
+
+		assign	gated_clk = S_AXI_ACLK && gaten;
+
+		assign	clk_active = r_clk_active;
+		// }}}
+		// }}}
+	end else begin : NO_CLK_GATING
+		// {{{
+		// Always active
+		assign	clk_active = 1'b1;
+		assign	gated_clk = S_AXI_ACLK;
+		// }}}
+	end endgenerate
+	// }}}
+
+	// Keep Verilator happy
+	// {{{
+	// Verilator coverage_off
 	// Verilator lint_off UNUSED
 	wire	unused;
 	assign	unused = &{ 1'b0, S_AXIL_AWPROT, S_AXIL_ARPROT, M_AXI_BID,
@@ -1499,6 +1706,7 @@ module	axis2mm #(
 			S_AXIL_AWADDR[AXILLSB-1:0],
 			new_wideaddr[2*C_AXIL_DATA_WIDTH-1:C_AXI_ADDR_WIDTH],
 			new_widelen };
+	// Verilator coverage_on
 	// Verilator lint_on  UNUSED
 	// }}}
 ////////////////////////////////////////////////////////////////////////////////
@@ -1556,7 +1764,6 @@ module	axis2mm #(
 		.i_axi_awvalid(S_AXIL_AWVALID),
 		.i_axi_awready(S_AXIL_AWREADY),
 		.i_axi_awaddr( S_AXIL_AWADDR),
-		.i_axi_awcache(4'h0),
 		.i_axi_awprot( S_AXIL_AWPROT),
 		//
 		.i_axi_wvalid(S_AXIL_WVALID),
@@ -1571,7 +1778,6 @@ module	axis2mm #(
 		.i_axi_arvalid(S_AXIL_ARVALID),
 		.i_axi_arready(S_AXIL_ARREADY),
 		.i_axi_araddr( S_AXIL_ARADDR),
-		.i_axi_arcache(4'h0),
 		.i_axi_arprot( S_AXIL_ARPROT),
 		//
 		.i_axi_rvalid(S_AXIL_RVALID),
@@ -1583,7 +1789,7 @@ module	axis2mm #(
 		.f_axi_wr_outstanding(faxil_wr_outstanding),
 		.f_axi_awr_outstanding(faxil_awr_outstanding)
 		// }}}
-		);
+	);
 
 	always @(*)
 	begin
@@ -1787,7 +1993,10 @@ module	axis2mm #(
 		assert(aw_multiple_bursts_remaining == (|aw_requests_remaining[LGLENW-1:LGMAXBURST+1]));
 
 	always @(*)
+	begin
 		assert(aw_last_outstanding == (aw_bursts_outstanding == 1));
+		assert(aw_none_outstanding == (aw_bursts_outstanding == 0));
+	end
 
 	//
 	// ...
@@ -1875,26 +2084,26 @@ module	axis2mm #(
 	// Synchronization properties
 	// {{{
 	always @(*)
-	if (fifo_full)
+	if (fifo_full || !clk_active)
 	begin
-		assert(!S_AXIS_TREADY);
+		assert(!sskd_ready);
 	end else if (OPT_TREADY_WHILE_IDLE)
 	begin
 		// If we aren't full, and we set TREADY whenever idle,
 		// then we should otherwise have TREADY set at all times
-		assert(S_AXIS_TREADY);
-	end else if (!r_tlast_syncd)
+		assert(sskd_ready);
+	end else if (!tlast_syncd)
 	begin
 		// If we aren't syncd, always be ready until we finally sync up
-		assert(S_AXIS_TREADY);
+		assert(sskd_ready);
 	end else if (reset_fifo)
 	begin
 		// If we aren't accepting any data, but are idling with TREADY
 		// low, then make sure we drop TREADY when idle
-		assert(!S_AXIS_TREADY);
+		assert(!sskd_ready);
 	end else
 		// In all other cases, assert TREADY
-		assert(S_AXIS_TREADY);
+		assert(sskd_ready);
 
 
 	//
@@ -1952,12 +2161,12 @@ module	axis2mm #(
 	////////////////////////////////////////////////////////////////////////
 	//
 	//
-	reg		cvr_aborted, cvr_buserr;
+	reg		cvr_aborted, cvr_buserr, cvr_abort_clear;
 	reg	[2:0]	cvr_continued;
 
 	initial	{ cvr_aborted, cvr_buserr } = 0;
 	always @(posedge i_clk)
-	if (i_reset || !r_busy)
+	if (i_reset)
 		{ cvr_aborted, cvr_buserr } <= 0;
 	else if (r_busy && !axi_abort_pending)
 	begin
@@ -1965,6 +2174,20 @@ module	axis2mm #(
 			cvr_aborted <= 1;
 		if (M_AXI_BVALID && M_AXI_BRESP[1])
 			cvr_buserr <= 1;
+	end
+
+	always @(posedge i_clk)
+	if (i_reset)
+		cvr_abort_clear <= 1'b0;
+	else if (cvr_aborted && !cvr_buserr && !cmd_abort)
+	begin
+		cvr_abort_clear <= 1;
+	end
+
+	always @(posedge i_clk)
+	if (!i_reset)
+	begin
+		cover(cvr_abort_clear);
 	end
 
 	initial	cvr_continued = 0;
@@ -2006,3 +2229,6 @@ module	axis2mm #(
 `endif
 	// }}}
 endmodule
+`ifndef	YOSYS
+`default_nettype wire
+`endif
