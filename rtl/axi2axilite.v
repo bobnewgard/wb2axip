@@ -492,7 +492,6 @@ module axi2axilite #(
 
 		// M_AXI_AW*
 		// {{{
-		assign	M_AXI_AWVALID= m_axi_awvalid;
 		assign	M_AXI_AWADDR = axi_awaddr;
 		assign	M_AXI_AWPROT = 0;
 		// }}}
